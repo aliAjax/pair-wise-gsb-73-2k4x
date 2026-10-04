@@ -181,6 +181,78 @@ export interface ThreatModelState {
   currentRevision: number
 }
 
+export interface CountersignPackageDecision {
+  id: string
+  threatId: string
+  role: ActorRole
+  actor: string
+  decision: DecisionType
+  comment: string
+  createdAt: string
+  revision: number
+}
+
+export interface CountersignPackageThreat {
+  id: string
+  code: string
+  title: string
+  revision: number
+  reviewStatus: ReviewStatus
+}
+
+export interface CountersignPackage {
+  packageType: 'scapex-countersign-package'
+  formatVersion: 1
+  exportedAt: string
+  exportedBy: string
+  modelRevision: number
+  versionId: string
+  versionLabel: string
+  threats: CountersignPackageThreat[]
+  decisions: CountersignPackageDecision[]
+}
+
+export type MergeConflictKind =
+  | 'invalid_package'
+  | 'unknown_threat'
+  | 'future_revision'
+  | 'stale_revision'
+  | 'invalid_decision'
+
+export interface MergeConflict {
+  kind: MergeConflictKind
+  message: string
+  threatId?: string
+  role?: ActorRole
+  decisionId?: string
+}
+
+export type MergeEntryAction = 'added' | 'replaced' | 'skipped'
+
+export interface MergePlanEntry {
+  decision: CountersignPackageDecision
+  action: MergeEntryAction
+  threatCode: string
+  note?: string
+}
+
+export interface MergeResult {
+  ok: boolean
+  attemptedAt: string
+  source: {
+    modelRevision: number
+    exportedAt: string
+    versionLabel: string
+    supplementOnly: boolean
+  } | null
+  conflicts: MergeConflict[]
+  entries: MergePlanEntry[]
+  appliedCount: number
+  replacedCount: number
+  skippedCount: number
+  affectedThreatIds: string[]
+}
+
 export interface ValidationIssue {
   id: string
   kind: 'uncovered_component' | 'control_failed' | 'risk_acceptance_expired' | 'mitigation_conflict' | 'missing_evidence'

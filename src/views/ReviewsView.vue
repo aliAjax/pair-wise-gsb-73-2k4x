@@ -9,7 +9,17 @@ import Textarea from 'primevue/textarea'
 import { useToast } from 'primevue/usetoast'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusTag from '@/components/StatusTag.vue'
-import type { ActorRole, DecisionType, Threat } from '@/models/domain'
+import MergeReport from '@/components/MergeReport.vue'
+import type {
+  ActorRole,
+  CountersignPackage,
+  DecisionType,
+  Threat,
+} from '@/models/domain'
+import {
+  parseCountersignPackage,
+  planMerge,
+} from '@/services/countersignPackage'
 import { decisionsForThreat, reviewProgress } from '@/services/selectors'
 import { useThreatModelStore } from '@/stores/threatModel'
 
@@ -100,6 +110,138 @@ const decisionLabel = (decision: DecisionType | 'pending'): string =>
   decision === 'pending'
     ? '待提交'
     : decisionOptions.find((item) => item.value === decision)?.label ?? decision
+
+// ---------- 会签包导出 / 回传合并 ----------
+const importVisible = ref(false)
+const packageText = ref('')
+const previewResult = ref<ReturnType<typeof planMerge> | null>(null)
+const previewParsed = ref<CountersignPackage | null>(null)
+const fileInput = ref<HTMLInputElement | null>(null)
+
+const downloadPackage = (): void => {
+  const pkg = store.exportCountersignPackage()
+  const blob = new Blob([JSON.stringify(pkg, null, 2)], {
+    type: 'application/json;charset=utf-8',
+  })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = `会签包-r${pkg.modelRevision}-${pkg.exportedAt.slice(0, 10)}.json`
+  anchor.click()
+  URL.revokeObjectURL(url)
+  toast.add({
+    severity: 'success',
+    summary: '会签包已导出',
+    detail: `基线 r${pkg.modelRevision}，含 ${pkg.threats.length} 条威胁与 ${pkg.decisions.length} 条意见`,
+    life: 3000,
+  })
+}
+
+const openImport = (): void => {
+  packageText.value = ''
+  previewResult.value = null
+  previewParsed.value = null
+  importVisible.value = true
+}
+
+const onFileChosen = async (event: Event): Promise<void> => {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  packageText.value = await file.text()
+  input.value = ''
+  checkPackage()
+}
+
+const checkPackage = (): void => {
+  const parsed = parseCountersignPackage(packageText.value)
+  if (parsed.error || !parsed.package) {
+    previewParsed.value = null
+    previewResult.value = {
+      ok: false,
+      attemptedAt: new Date().toISOString(),
+      source: null,
+      conflicts: [{ kind: 'invalid_package', message: parsed.error ?? '无法解析会签包。' }],
+      entries: [],
+      appliedCount: 0,
+      replacedCount: 0,
+      skippedCount: 0,
+      affectedThreatIds: [],
+    }
+    return
+  }
+  previewParsed.value = parsed.package
+  previewResult.value = planMerge(store.data, parsed.package)
+}
+
+const confirmMerge = (): void => {
+  const result = store.applyCountersignImport(packageText.value)
+  importVisible.value = false
+  if (result.ok) {
+    toast.add({
+      severity: 'success',
+      summary: '会签包已合并',
+      detail: `新增 ${result.appliedCount} · 替换 ${result.replacedCount} · 跳过 ${result.skippedCount}`,
+      life: 3500,
+    })
+  } else {
+    toast.add({
+      severity: 'error',
+      summary: '合并失败，已整包回滚',
+      detail: `${result.conflicts.length} 项冲突，原会签与基线未改动`,
+      life: 4000,
+    })
+  }
+}
+
+/** 构造一个离线负责人回传包样例（可在文本框继续编辑后校验）。 */
+const loadSamplePackage = (): void => {
+  const base = store.exportCountersignPackage()
+  const thr01 = store.data.threats.find((item) => item.id === 'thr-01')
+  const sample: CountersignPackage = {
+    ...base,
+    exportedAt: new Date().toISOString(),
+    exportedBy: '异地会签负责人',
+    decisions: [
+      ...base.decisions.filter(
+        // 同角色重复意见：保留回传包中的最新一条，进入“重新确认”
+        (decision) => !(decision.threatId === 'thr-01' && decision.role === 'security'),
+      ),
+      {
+        id: 'offline-dec-thr01-security',
+        threatId: 'thr-01',
+        role: 'security',
+        actor: '王岚（离线）',
+        decision: 'approved' as DecisionType,
+        comment: '旁路告警证据已在离线环境核验，补充一周告警样本后通过。',
+        createdAt: new Date(Date.now() + 3600_000).toISOString(),
+        revision: thr01?.revision ?? base.modelRevision,
+      },
+      {
+        id: 'offline-dec-thr01-dev',
+        threatId: 'thr-01',
+        role: 'development',
+        actor: '赵恺（离线）',
+        decision: 'approved' as DecisionType,
+        comment: '公网暴露面收敛已完成灰度，开发侧确认通过。',
+        createdAt: new Date(Date.now() + 7200_000).toISOString(),
+        revision: thr01?.revision ?? base.modelRevision,
+      },
+      {
+        id: 'offline-dec-stale-demo',
+        threatId: 'thr-03',
+        role: 'security',
+        actor: '离线旧版意见',
+        decision: 'evidence_required' as DecisionType,
+        comment: '这是一条基于旧修订 r1 的意见，用于演示修订失效冲突。',
+        createdAt: new Date(Date.now() + 1800_000).toISOString(),
+        revision: (thr01?.revision ?? 2) - 1,
+      },
+    ],
+  }
+  packageText.value = JSON.stringify(sample, null, 2)
+  checkPackage()
+}
 </script>
 
 <template>
@@ -125,6 +267,28 @@ const decisionLabel = (decision: DecisionType | 'pending'): string =>
           {{ latestVersion ? new Date(latestVersion.createdAt).toLocaleString('zh-CN') : '-' }}
         </strong>
       </div>
+    </section>
+
+    <section class="package-hub panel">
+      <div class="panel-header">
+        <div>
+          <h2 class="panel-title">离线会签包交换</h2>
+          <p class="hub-subtitle">
+            导出当前会签包分发给异地负责人；负责人离线审完回传后在此合并。包内带模型版本号与逐条威胁修订号，
+            修订更新后旧意见失效；旧包只补缺失角色，不能覆盖新修订意见。
+          </p>
+        </div>
+        <div class="hub-actions">
+          <Button label="导出当前会签包" icon="pi pi-download" severity="secondary" outlined @click="downloadPackage" />
+          <Button label="接收回传包并合并" icon="pi pi-upload" @click="openImport" />
+        </div>
+      </div>
+      <div class="hub-rules">
+        <span><i class="pi pi-check-circle"></i> 同一角色重复意见仅保留一条，并按回传意见重新确认通过/驳回</span>
+        <span><i class="pi pi-times-circle"></i> 合并失败整包回滚，原会签、版本基线与审计轨迹不变，冲突逐条列出</span>
+        <span><i class="pi pi-sync"></i> 合并后报告页、版本页与会签中心展示同一结果</span>
+      </div>
+      <MergeReport v-if="store.lastMergeResult" :result="store.lastMergeResult" class="hub-report" />
     </section>
 
     <div class="review-board">
@@ -226,6 +390,51 @@ const decisionLabel = (decision: DecisionType | 'pending'): string =>
       <template #footer>
         <Button label="取消" severity="secondary" outlined @click="decisionVisible = false" />
         <Button label="提交意见" icon="pi pi-check" @click="submitDecision" />
+      </template>
+    </Dialog>
+
+    <Dialog v-model:visible="importVisible" header="接收负责人回传会签包" modal :style="{ width: '860px' }">
+      <div class="import-dialog-body">
+        <div class="import-toolbar">
+          <Button label="选择回传包文件" icon="pi pi-file" severity="secondary" outlined @click="fileInput?.click()" />
+          <input
+            ref="fileInput"
+            type="file"
+            accept="application/json,.json"
+            hidden
+            @change="onFileChosen"
+          />
+          <Button label="载入演示回传包" icon="pi pi-microchip" severity="secondary" text @click="loadSamplePackage" />
+          <Button label="校验合并规则" icon="pi pi-search" outlined @click="checkPackage" :disabled="!packageText.trim()" />
+          <span class="muted import-hint">也可将异地负责人回传的 JSON 直接粘贴到下方文本框</span>
+        </div>
+        <Textarea
+          v-model="packageText"
+          rows="10"
+          class="package-editor"
+          placeholder="在此粘贴回传会签包 JSON，或点击「选择回传包文件」"
+        />
+
+        <div v-if="previewResult" class="preview-report">
+          <div v-if="previewParsed" class="preview-meta muted">
+            回传包基线 v1.{{ previewParsed.modelRevision }}（{{ previewParsed.versionLabel }}）
+            ｜导出时间 {{ new Date(previewParsed.exportedAt).toLocaleString('zh-CN') }}
+            ｜意见 {{ previewParsed.decisions.length }} 条
+            <span v-if="previewParsed.modelRevision < store.data.currentRevision" class="supplement-tag">
+              旧包 · 仅补缺
+            </span>
+          </div>
+          <MergeReport :result="previewResult" />
+        </div>
+      </div>
+      <template #footer>
+        <Button label="取消" severity="secondary" outlined @click="importVisible = false" />
+        <Button
+          label="确认合并"
+          icon="pi pi-check-circle"
+          :disabled="!previewResult || !previewResult.ok"
+          @click="confirmMerge"
+        />
       </template>
     </Dialog>
   </div>
@@ -382,5 +591,101 @@ const decisionLabel = (decision: DecisionType | 'pending'): string =>
   color: #566176;
   font-size: 12px;
   line-height: 1.5;
+}
+
+.package-hub {
+  display: grid;
+  gap: 14px;
+}
+
+.hub-subtitle {
+  margin: 6px 0 0;
+  color: #6d788c;
+  font-size: 12px;
+  line-height: 1.6;
+  max-width: 760px;
+}
+
+.hub-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.hub-rules {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+  padding: 0 16px;
+  color: #5d687c;
+  font-size: 11px;
+}
+
+.hub-rules span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hub-rules i.pi-check-circle {
+  color: #2f8f69;
+}
+
+.hub-rules i.pi-times-circle {
+  color: #c64b39;
+}
+
+.hub-rules i.pi-sync {
+  color: #4c78a8;
+}
+
+.hub-report {
+  margin: 0 16px 16px;
+  padding: 14px;
+  border: 1px solid #e2e7ee;
+  border-radius: 6px;
+  background: #fafbfd;
+}
+
+.import-dialog-body {
+  display: grid;
+  gap: 12px;
+}
+
+.import-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.import-hint {
+  font-size: 11px;
+}
+
+.package-editor {
+  width: 100%;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+}
+
+.preview-report {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #e2e7ee;
+  border-radius: 6px;
+  background: #fafbfd;
+}
+
+.preview-meta {
+  font-size: 11px;
+}
+
+.supplement-tag {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  color: #8a5a00;
+  background: #fdf0d8;
 }
 </style>

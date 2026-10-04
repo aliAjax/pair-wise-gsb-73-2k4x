@@ -5,6 +5,7 @@ import Checkbox from 'primevue/checkbox'
 import { useToast } from 'primevue/usetoast'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusTag from '@/components/StatusTag.vue'
+import MergeReport from '@/components/MergeReport.vue'
 import { riskLevel, riskScore } from '@/services/selectors'
 import { useThreatModelStore } from '@/stores/threatModel'
 
@@ -62,6 +63,12 @@ const downloadReport = (): void => {
       eyebrow="交付物"
       title="导出评审报告"
       description="按需组合威胁、风险、证据、会签和审计信息，生成可归档的 Markdown 报告。"
+    />
+
+    <MergeReport
+      v-if="store.lastMergeResult"
+      :result="store.lastMergeResult"
+      class="panel report-merge-panel"
     />
 
     <div class="report-layout">
@@ -124,6 +131,11 @@ const downloadReport = (): void => {
 </template>
 
 <style scoped>
+.report-merge-panel {
+  margin-bottom: 16px;
+  padding: 16px;
+}
+
 .report-layout {
   display: grid;
   grid-template-columns: 330px minmax(0, 1fr);

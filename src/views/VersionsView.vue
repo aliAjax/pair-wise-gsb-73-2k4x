@@ -9,6 +9,7 @@ import MultiSelect from 'primevue/multiselect'
 import Textarea from 'primevue/textarea'
 import { useToast } from 'primevue/usetoast'
 import PageHeader from '@/components/PageHeader.vue'
+import MergeReport from '@/components/MergeReport.vue'
 import type { VersionChange, VersionSnapshot } from '@/models/domain'
 import { compareSnapshots } from '@/services/selectors'
 import { useThreatModelStore } from '@/stores/threatModel'
@@ -92,6 +93,10 @@ const approvalLabel = (snapshot: VersionSnapshot): string =>
     const threat = store.data.threats.find((item) => item.id === id)
     return threat?.reviewStatus === 'approved'
   }).length}/${snapshot.affectedThreatIds.length}`
+
+const packageAuditEvents = computed(() =>
+  store.data.audit.filter((event) => event.entityType === 'countersign_package'),
+)
 </script>
 
 <template>
@@ -155,6 +160,12 @@ const approvalLabel = (snapshot: VersionSnapshot): string =>
       </div>
     </section>
 
+    <MergeReport
+      v-if="store.lastMergeResult"
+      :result="store.lastMergeResult"
+      class="panel merge-panel"
+    />
+
     <div class="versions-grid">
       <section class="panel">
         <div class="panel-header">
@@ -186,13 +197,21 @@ const approvalLabel = (snapshot: VersionSnapshot): string =>
       <section class="panel audit-panel">
         <div class="panel-header">
           <h2 class="panel-title">审计轨迹</h2>
-          <span class="muted">{{ store.data.audit.length }} 条</span>
+          <span class="muted">{{ store.data.audit.length }} 条 · 会签包 {{ packageAuditEvents.length }} 条</span>
         </div>
         <div class="audit-list">
-          <article v-for="event in store.data.audit.slice(0, 12)" :key="event.id" class="audit-item">
+          <article
+            v-for="event in store.data.audit.slice(0, 12)"
+            :key="event.id"
+            class="audit-item"
+            :class="{ 'audit-package': event.entityType === 'countersign_package' }"
+          >
             <i class="pi pi-circle-fill"></i>
             <div>
-              <strong>{{ event.action }}</strong>
+              <strong>
+                {{ event.action }}
+                <span v-if="event.entityType === 'countersign_package'" class="package-badge">会签包</span>
+              </strong>
               <p>{{ event.detail }}</p>
               <span>{{ event.actor }} · {{ new Date(event.createdAt).toLocaleString('zh-CN') }}</span>
             </div>
@@ -238,6 +257,29 @@ const approvalLabel = (snapshot: VersionSnapshot): string =>
 </template>
 
 <style scoped>
+.merge-panel {
+  margin-bottom: 16px;
+  padding: 16px;
+}
+
+.package-badge {
+  margin-left: 7px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: #24507f;
+  background: #e6f0fa;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.audit-item.audit-package {
+  padding-left: 2px;
+}
+
+.audit-item.audit-package > i {
+  color: #2f6fa8;
+}
+
 .compare-toolbar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 40px minmax(0, 1fr);
