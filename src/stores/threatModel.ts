@@ -3,15 +3,26 @@ import { defineStore } from 'pinia'
 import type {
   ActorRole,
   AuditEvent,
+  CountersignPackage,
   DecisionType,
+  MergePlanItem,
+  MergePreview,
+  MergeReport,
+  MergeResolution,
   Threat,
   ThreatModelState,
   VersionSnapshot,
 } from '@/models/domain'
 import { createId, loadState, resetState, saveState } from '@/services/repository'
 import {
+  buildCountersignPackage,
+  commitMerge,
+  hasBlockingConflicts,
+  previewMerge,
+  recalcThreatStatus,
+} from '@/services/countersign'
+import {
   dashboardMetrics,
-  decisionsForThreat,
   getValidationIssues,
   reviewProgress,
 } from '@/services/selectors'
@@ -36,6 +47,7 @@ interface IdentifiedEntity {
 export const useThreatModelStore = defineStore('threat-model', () => {
   const data = ref<ThreatModelState>(loadState())
   const lastSavedAt = ref(new Date().toISOString())
+  const lastMergeReport = ref<MergeReport | null>(null)
 
   const metrics = computed(() => dashboardMetrics(data.value))
   const issues = computed(() => getValidationIssues(data.value))
@@ -159,21 +171,7 @@ export const useThreatModelStore = defineStore('threat-model', () => {
       revision: threat.revision,
     })
 
-    const currentDecisions = decisionsForThreat(data.value.decisions, threatId, threat.revision)
-    const requiredRoles: ActorRole[] = ['development', 'security', 'business']
-    const allSubmitted = requiredRoles.every((requiredRole) =>
-      currentDecisions.some((item) => item.role === requiredRole),
-    )
-    if (currentDecisions.some((item) => item.decision === 'rejected')) {
-      threat.reviewStatus = 'rejected'
-    } else if (
-      allSubmitted &&
-      currentDecisions.every((item) => item.decision === 'approved')
-    ) {
-      threat.reviewStatus = 'approved'
-    } else {
-      threat.reviewStatus = 'in_review'
-    }
+    threat.reviewStatus = recalcThreatStatus(data.value.decisions, threatId, threat.revision)
 
     const decisionLabel: Record<DecisionType, string> = {
       accept: '接受',
@@ -223,6 +221,69 @@ export const useThreatModelStore = defineStore('threat-model', () => {
   const resetDemo = (): void => {
     data.value = resetState()
     lastSavedAt.value = new Date().toISOString()
+    lastMergeReport.value = null
+  }
+
+  const exportCountersignPackage = (): string => {
+    const pkg = buildCountersignPackage(data.value)
+    return JSON.stringify(pkg, null, 2)
+  }
+
+  const inspectCountersignPackage = (pkg: CountersignPackage): MergePreview =>
+    previewMerge(data.value, pkg)
+
+  /**
+   * 合并回传包。先在纯数据深拷贝上完成合并，成功后一次性替换当前状态；
+   * 仍有未解决冲突或合并过程异常时，原会签、版本基线与审计轨迹保持原样。
+   */
+  const mergeCountersignPackage = (
+    preview: MergePreview,
+    responses: MergeResolution[],
+  ): { ok: true; report: MergeReport } | { ok: false; conflicts: MergePreview } => {
+    if (hasBlockingConflicts(preview, responses)) {
+      return { ok: false, conflicts: preview }
+    }
+
+    const candidate = structuredClone(data.value)
+    try {
+      const result = commitMerge(candidate, preview, responses)
+      const appliedItems: MergePlanItem[] = preview.plan.filter((item) => {
+        if (item.outcome === 'apply') return true
+        const useIncoming = responses.some(
+          (entry) => entry.decisionId === item.decisionId && entry.resolution === 'use_incoming',
+        )
+        return item.outcome === 'conflict' && item.conflict?.kind === 'role_conflict' && useIncoming
+      })
+
+      const report: MergeReport = {
+        mergedAt: new Date().toISOString(),
+        exportedAt: preview.pkg.exportedAt,
+        baseRevision: preview.pkg.baseRevision,
+        applied: result.decisionsAdded + result.decisionsReplaced,
+        skipped: preview.skippedCount,
+        conflicts: preview.conflicts.length,
+        appliedItems,
+        skippedItems: preview.plan.filter((item) => item.outcome === 'skip'),
+        source: `${preview.pkg.exportedBy} · ${new Date(preview.pkg.exportedAt).toLocaleString('zh-CN')}`,
+      }
+
+      candidate.audit.unshift({
+        id: createId('aud'),
+        entityType: 'countersign-package',
+        entityId: `v1.${preview.pkg.baseRevision}`,
+        action: '合并离线会签包',
+        actor: '当前用户',
+        createdAt: new Date().toISOString(),
+        detail: `并入 ${report.applied} 条意见（补入 ${result.decisionsAdded}、重新确认 ${result.decisionsReplaced}），重复跳过 ${report.skipped} 条；来源：${report.source}`,
+      })
+
+      data.value = candidate
+      persist()
+      lastMergeReport.value = report
+      return { ok: true, report }
+    } catch {
+      return { ok: false, conflicts: preview }
+    }
   }
 
   const exportReport = (): string => {
@@ -263,6 +324,18 @@ export const useThreatModelStore = defineStore('threat-model', () => {
         (decision) =>
           `- ${decision.createdAt} ${decision.actor}（${decision.role}）${decision.decision}：${decision.comment}`,
       ),
+      '',
+      '## 离线会签包合并',
+      ...(lastMergeReport.value
+        ? [
+            `- 最近合并：${lastMergeReport.value.mergedAt}（包基线 v1.${lastMergeReport.value.baseRevision}）`,
+            `- 并入 ${lastMergeReport.value.applied} 条，重复跳过 ${lastMergeReport.value.skipped} 条，冲突 ${lastMergeReport.value.conflicts} 条`,
+            ...lastMergeReport.value.appliedItems.map(
+              (item) =>
+                `- [并入] ${item.threatId} ${item.role} ${item.actor}（${item.decision}）：${item.comment}`,
+            ),
+          ]
+        : ['- 尚未合并过离线会签包']),
     ]
     return lines.join('\n')
   }
@@ -270,6 +343,7 @@ export const useThreatModelStore = defineStore('threat-model', () => {
   return {
     data,
     lastSavedAt,
+    lastMergeReport,
     metrics,
     issues,
     pendingReviews,
@@ -284,6 +358,9 @@ export const useThreatModelStore = defineStore('threat-model', () => {
     closeRisk,
     resetDemo,
     exportReport,
+    exportCountersignPackage,
+    inspectCountersignPackage,
+    mergeCountersignPackage,
     reviewProgress,
   }
 })

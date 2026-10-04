@@ -190,6 +190,99 @@ export interface ValidationIssue {
   entityId: string
 }
 
+export const COUNTERSIGN_PACKAGE_FORMAT = 'scapex-countersign-package/v1'
+
+export interface CountersignPackageDecision {
+  id: string
+  threatId: string
+  role: ActorRole
+  actor: string
+  decision: DecisionType
+  comment: string
+  createdAt: string
+  revision: number
+}
+
+export interface CountersignPackageThreat {
+  id: string
+  code: string
+  title: string
+  revision: number
+  reviewStatus: ReviewStatus
+}
+
+export interface CountersignPackage {
+  format: string
+  boundaryId: string
+  exportedAt: string
+  exportedBy: string
+  baseRevision: number
+  threats: CountersignPackageThreat[]
+  decisions: CountersignPackageDecision[]
+}
+
+export type MergeConflictKind =
+  | 'malformed_package'
+  | 'boundary_mismatch'
+  | 'future_revision'
+  | 'stale_opinion'
+  | 'role_conflict'
+  | 'duplicate_in_package'
+  | 'invalid_decision'
+
+export type MergeEntryOutcome = 'apply' | 'skip' | 'conflict'
+
+export interface MergeConflict {
+  kind: MergeConflictKind
+  threatId?: string
+  role?: ActorRole
+  title: string
+  detail: string
+}
+
+export interface MergePlanItem {
+  decisionId: string
+  threatId: string
+  role: ActorRole
+  actor: string
+  decision: DecisionType
+  comment: string
+  createdAt: string
+  revision: number
+  outcome: MergeEntryOutcome
+  note: string
+  conflict?: MergeConflict
+}
+
+export type RoleResolution = 'keep_local' | 'use_incoming'
+
+export interface MergeResolution {
+  decisionId: string
+  resolution: RoleResolution
+}
+
+export interface MergePreview {
+  pkg: CountersignPackage
+  plan: MergePlanItem[]
+  conflicts: MergeConflict[]
+  packageConflicts: MergeConflict[]
+  resolvableConflicts: MergePlanItem[]
+  appliedCount: number
+  skippedCount: number
+}
+
+export interface MergeReport {
+  mergedAt: string
+  exportedAt: string
+  baseRevision: number
+  applied: number
+  skipped: number
+  conflicts: number
+  appliedItems: MergePlanItem[]
+  skippedItems: MergePlanItem[]
+  source: string
+}
+
 export interface VersionChange {
   category: string
   id: string
